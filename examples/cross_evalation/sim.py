@@ -1,14 +1,17 @@
 import math
 import os
+from typing import List, Tuple
 
 # Make TensorFlow logs less verbose
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
+import numpy as np
 import tensorflow as tf
 
 import flwr as fl
 
-NUM_CLIENTS = 100
+NUM_CLIENTS = 10
+NUM_CLUSTERS = 4  # 0-9
 
 
 class FlwrClient(fl.client.NumPyClient):
@@ -33,39 +36,78 @@ class FlwrClient(fl.client.NumPyClient):
         return loss, len(self.x_val), {"accuracy": acc}
 
 
-def client_fn(cid: str) -> fl.client.Client:
-    # Load model
-    model = tf.keras.models.Sequential(
-        [
-            tf.keras.layers.Flatten(input_shape=(28, 28)),
-            tf.keras.layers.Dense(128, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(10, activation="softmax"),
-        ]
-    )
-    model.compile("adam", "sparse_categorical_crossentropy", metrics=["accuracy"])
+def make_client_fn():
 
     # Load data partition (divide MNIST into NUM_CLIENTS distinct partitions)
     (x_train, y_train), _ = tf.keras.datasets.mnist.load_data()
+
+    # NEW: repartition among clients, with label-based clusters
+    clusters = {}
+    clients_in_cluster = {}
+    for i, n in enumerate(
+        [
+            [i for i in range(NUM_CLIENTS) if i % NUM_CLUSTERS == j]
+            for j in range(NUM_CLUSTERS)
+        ]
+    ):
+        clusters[f"cluster_{i}"] = (
+            x_train[y_train % NUM_CLUSTERS == i],
+            y_train[y_train % NUM_CLUSTERS == i],
+        )
+        clients_in_cluster[f"cluster_{i}"] = n
+
+    def client_fn(cid: str) -> fl.client.Client:
+        # Load model
+        model = tf.keras.models.Sequential(
+            [
+                tf.keras.layers.Flatten(input_shape=(28, 28)),
+                tf.keras.layers.Dense(128, activation="relu"),
+                tf.keras.layers.Dropout(0.2),
+                tf.keras.layers.Dense(10, activation="softmax"),
+            ]
+        )
+        model.compile("adam", "sparse_categorical_crossentropy", metrics=["accuracy"])
+
+        cluster = f"cluster_{int(cid) % NUM_CLUSTERS}"
+        n_clients = len(clients_in_cluster[cluster])
+        partition_size = math.floor(len(clusters[cluster][1]) / n_clients)
+
+        idx_from, idx_to = (
+            int(cid) % n_clients * partition_size,
+            (int(cid) % n_clients + 1) * partition_size,
+        )
+        x_train_cid = clusters[cluster][0][idx_from:idx_to] / 255.0
+        y_train_cid = clusters[cluster][1][idx_from:idx_to]
+
+        # x_train_cid, y_train_cid = load_data_for_client(cid)
+
+        # Create and return client
+        return FlwrClient(model, x_train_cid, y_train_cid)
+
+    return client_fn
+
+
+def load_data_for_client(cid: str) -> Tuple[np.ndarray, np.ndarray]:
+    (x_train, y_train), _ = tf.keras.datasets.mnist.load_data()
+
+    # ORIGINAL: simple repartition among clients
     partition_size = math.floor(len(x_train) / NUM_CLIENTS)
     idx_from, idx_to = int(cid) * partition_size, (int(cid) + 1) * partition_size
     x_train_cid = x_train[idx_from:idx_to] / 255.0
     y_train_cid = y_train[idx_from:idx_to]
 
-    # Create and return client
-    return FlwrClient(model, x_train_cid, y_train_cid)
+    return x_train_cid, y_train_cid
 
 
 def main() -> None:
     # Start Flower simulation
+
     fl.simulation.start_simulation(
-        client_fn=client_fn,
+        client_fn=make_client_fn(),
         num_clients=NUM_CLIENTS,
-        client_resources={"num_cpus": 4},
+        client_resources={"num_cpus": 12},
         config=fl.server.ServerConfig(num_rounds=5),
         strategy=fl.server.strategy.FedAvg(
-            fraction_fit=0.1,
-            fraction_evaluate=0.1,
             min_fit_clients=10,
             min_evaluate_clients=10,
             min_available_clients=NUM_CLIENTS,
