@@ -87,18 +87,6 @@ def make_client_fn():
     return client_fn
 
 
-def load_data_for_client(cid: str) -> Tuple[np.ndarray, np.ndarray]:
-    (x_train, y_train), _ = tf.keras.datasets.mnist.load_data()
-
-    # ORIGINAL: simple repartition among clients
-    partition_size = math.floor(len(x_train) / NUM_CLIENTS)
-    idx_from, idx_to = int(cid) * partition_size, (int(cid) + 1) * partition_size
-    x_train_cid = x_train[idx_from:idx_to] / 255.0
-    y_train_cid = y_train[idx_from:idx_to]
-
-    return x_train_cid, y_train_cid
-
-
 def main() -> None:
     # Start Flower simulation
 
